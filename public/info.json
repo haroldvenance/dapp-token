@@ -1,0 +1,7 @@
+{
+  "name": "SangoCoin",
+  "symbol": "SGC",
+  "decimals": 18,
+  "logoURI": "https://dapp-token.netlify.app/logo.png",
+  "website": "https://dapp-token.netlify.app"
+}
