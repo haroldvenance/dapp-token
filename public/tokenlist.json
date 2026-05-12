@@ -1,0 +1,18 @@
+{
+  "name": "SangoCoin Token List",
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "tokens": [
+    {
+      "chainId": 11155111,
+      "address": "0x55E3AC18F352cd77A01612d7C595Cb5bE367FB97",
+      "name": "SangoCoin",
+      "symbol": "SGC",
+      "decimals": 18,
+      "logoURI": "https://dapp-sangocoin.netlify.app/logo.png"
+    }
+  ]
+}
