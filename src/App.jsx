@@ -5,7 +5,7 @@ import QRCode from 'qrcode.react';
 
 import { WagmiProvider } from 'wagmi';
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query';
-import { useAccount, useConnect, useDisconnect, useWalletClient } from 'wagmi';
+import { useAccount, useConnect, useDisconnect, useWalletClient, useSwitchChain } from 'wagmi';
 
 import { config } from './config';
 import TokenArtifact from './contracts/SangoCoin.json';
@@ -89,9 +89,15 @@ function MainContent() {
   const [tokenList, setTokenList] = useState([]);
   const [loadingTokens, setLoadingTokens] = useState(false);
 
+  // Historique des transactions
+  const [history, setHistory] = useState([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
   const { address: account, isConnected } = useAccount();
   const { data: walletClient } = useWalletClient();
+  const { switchChain } = useSwitchChain();
 
+  // ----- Conversion du WalletClient en Signer ethers -----
   useEffect(() => {
     if (!isConnected || !walletClient) {
       setSigner(null);
@@ -107,6 +113,7 @@ function MainContent() {
     }
   }, [isConnected, walletClient]);
 
+  // ----- Création du contrat ethers -----
   useEffect(() => {
     if (!isConnected || !signer) {
       setContract(null);
@@ -127,6 +134,7 @@ function MainContent() {
       setIsOwner(account.toLowerCase() === ownerAddr.toLowerCase());
     } catch (err) {
       console.error(err);
+      toast.error('Impossible de lire le solde. Vérifiez le réseau.');
     }
   }
 
@@ -136,34 +144,20 @@ function MainContent() {
     setBalance(ethers.utils.formatUnits(bal, 18));
   }, [contract, account]);
 
-  const switchToSepolia = async () => {
-    if (!window.ethereum) return;
-    const sepoliaChainId = '0xaa36a7';
-    try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: sepoliaChainId }],
-      });
-    } catch (switchError) {
-      if (switchError.code === 4902) {
-        await window.ethereum.request({
-          method: 'wallet_addEthereumChain',
-          params: [{
-            chainId: sepoliaChainId,
-            chainName: 'Sepolia Testnet',
-            rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
-            blockExplorerUrls: ['https://sepolia.etherscan.io'],
-            nativeCurrency: { name: 'SepoliaETH', symbol: 'ETH', decimals: 18 }
-          }]
-        });
-      } else {
-        toast.error('Erreur lors du changement de réseau');
-      }
+  // ----- Changement de réseau avec wagmi -----
+  const switchToSepolia = () => {
+    if (switchChain) {
+      switchChain({ chainId: 11155111 });
+    } else {
+      toast.error('Changement de réseau non supporté sur ce wallet');
     }
   };
 
   const addTokenToMetaMask = async () => {
-    if (!window.ethereum) return;
+    if (!window.ethereum) {
+      toast('Méthode disponible uniquement avec MetaMask desktop. Importez le token manuellement.', { icon: 'ℹ️' });
+      return;
+    }
     try {
       await window.ethereum.request({
         method: 'wallet_watchAsset',
@@ -221,9 +215,9 @@ function MainContent() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Récupération des tokens détenus via Etherscan (Sepolia)
+  // ----- Récupération des tokens -----
   const fetchTokenList = async () => {
-    if (!account) return;
+    if (!account || !walletClient) return;
     const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
     if (!apiKey) {
       toast.error('Clé API Etherscan manquante');
@@ -231,16 +225,14 @@ function MainContent() {
     }
     setLoadingTokens(true);
     try {
-      // ---- 1. Récupérer les transactions de tokens ----
       const url = `https://api-sepolia.etherscan.io/api?module=account&action=tokentx&address=${account}&sort=desc&apikey=${apiKey}`;
       const response = await fetch(url);
       const data = await response.json();
 
-      // Liste finale
       const contractsData = [];
 
-      // ---- 2. Ajouter SangoCoin (SGC) en priorité ----
-      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      // Ajouter SGC en priorité
+      const provider = new ethers.providers.Web3Provider(walletClient.transport);
       const sgcContract = new ethers.Contract(TOKEN_ADDRESS, ABI, provider);
       const sgcBalance = await sgcContract.balanceOf(account);
       if (sgcBalance.gt(0)) {
@@ -251,16 +243,13 @@ function MainContent() {
         });
       }
 
-      // ---- 3. Traiter les autres tokens (issus des transactions) ----
-      if (data.status === '0' && data.message === 'No transactions found') {
-        // Aucune transaction, on garde juste SGC (déjà ajouté)
-      } else if (data.status === '1' && data.result) {
+      // Traiter les autres tokens
+      if (data.status === '1' && data.result) {
         const tokenAddresses = [...new Set(data.result.map(tx => tx.contractAddress))];
-        // Filtrer pour ne pas ajouter SGC en double
         const minABI = ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)', 'function decimals() view returns (uint8)'];
 
         for (const addr of tokenAddresses) {
-          if (addr.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) continue; // déjà ajouté
+          if (addr.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) continue;
           try {
             const tok = new ethers.Contract(addr, minABI, provider);
             const bal = await tok.balanceOf(account);
@@ -273,12 +262,8 @@ function MainContent() {
                 balance: ethers.utils.formatUnits(bal, decimals),
               });
             }
-          } catch (e) {
-            // ignorer les contrats non-ERC20
-          }
+          } catch (e) { /* ignorer les non-ERC20 */ }
         }
-      } else {
-        // Cas d'erreur API inattendu, on conserve SGC si déjà ajouté
       }
 
       setTokenList(contractsData);
@@ -289,12 +274,54 @@ function MainContent() {
     }
   };
 
+  // ----- Historique des transactions (10 dernières) -----
+  const fetchHistory = async () => {
+    if (!account || !walletClient) return;
+    const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
+    if (!apiKey) {
+      toast.error('Clé API Etherscan manquante');
+      return;
+    }
+    setLoadingHistory(true);
+    try {
+      const url = `https://api-sepolia.etherscan.io/api?module=account&action=tokentx&address=${account}&sort=desc&apikey=${apiKey}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      if (data.status === '1' && data.result) {
+        const filtered = data.result
+          .filter(tx => tx.contractAddress.toLowerCase() === TOKEN_ADDRESS.toLowerCase())
+          .slice(0, 10)
+          .map(tx => ({
+            hash: tx.hash,
+            from: tx.from,
+            to: tx.to,
+            value: ethers.utils.formatUnits(tx.value, tx.tokenDecimal),
+            timestamp: new Date(parseInt(tx.timeStamp) * 1000).toLocaleString(),
+          }));
+        setHistory(filtered);
+      } else {
+        setHistory([]);
+      }
+    } catch (err) {
+      toast.error('Erreur lors du chargement de l\'historique');
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
   useEffect(() => {
     if (isConnected && activeTab === 'tokens') {
       fetchTokenList();
     }
   }, [isConnected, activeTab]);
 
+  useEffect(() => {
+    if (isConnected && activeTab === 'history') {
+      fetchHistory();
+    }
+  }, [isConnected, activeTab]);
+
+  // ----- Rendu des onglets -----
   const renderTabContent = () => {
     switch (activeTab) {
       case 'send':
@@ -413,11 +440,29 @@ function MainContent() {
 
       case 'history':
         return (
-          <div className="text-center py-10">
-            <h3 className="text-lg font-semibold text-gray-800">Historique</h3>
-            <p className="text-gray-500 mt-4 text-sm">Consultez vos transactions sur Etherscan.</p>
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-gray-800">Historique des transactions SGC</h3>
+            {loadingHistory ? (
+              <p className="text-sm text-gray-500">Chargement...</p>
+            ) : history.length > 0 ? (
+              <ul className="divide-y divide-gray-200 max-h-60 overflow-y-auto">
+                {history.map((tx, idx) => (
+                  <li key={idx} className="py-3 text-sm">
+                    <p className="text-gray-600">
+                      {tx.from.slice(0, 6)}... → {tx.to.slice(0, 6)}...
+                      <span className="font-semibold ml-2">{tx.value} SGC</span>
+                    </p>
+                    <p className="text-xs text-gray-400">{tx.timestamp}</p>
+                    <a href={`https://sepolia.etherscan.io/tx/${tx.hash}`} target="_blank" rel="noopener noreferrer"
+                      className="text-indigo-600 underline text-xs">Voir sur Etherscan</a>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-500">Aucune transaction trouvée.</p>
+            )}
             <a href={`https://sepolia.etherscan.io/address/${account}`} target="_blank" rel="noopener noreferrer"
-              className="text-indigo-600 underline text-sm mt-2 inline-block">
+              className="inline-block text-indigo-600 underline text-sm mt-2">
               Ouvrir Etherscan
             </a>
           </div>
