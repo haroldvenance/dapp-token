@@ -5,7 +5,7 @@ import QRCode from 'qrcode.react';
 
 import { WagmiProvider } from 'wagmi';
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query';
-import { useAccount, useConnect, useDisconnect, useWalletClient, useSwitchChain } from 'wagmi';
+import { useAccount, useConnect, useDisconnect, useWalletClient, useSwitchChain, useChainId } from 'wagmi';
 
 import { config } from './config';
 import TokenArtifact from './contracts/SangoCoin.json';
@@ -13,6 +13,7 @@ import TokenArtifact from './contracts/SangoCoin.json';
 const TOKEN_ADDRESS = '0x55E3AC18F352cd77A01612d7C595Cb5bE367FB97';
 const ABI = TokenArtifact.abi;
 
+// Nouvel adaptateur plus robuste : utilise le walletClient pour obtenir un signer compatible mobile
 function walletClientToSigner(walletClient) {
   const { account, chain, transport } = walletClient;
   const network = {
@@ -20,7 +21,9 @@ function walletClientToSigner(walletClient) {
     name: chain.name,
     ensAddress: chain.contracts?.ensRegistry?.address,
   };
+  // Créer un provider ethers à partir du transport viem
   const provider = new ethers.providers.Web3Provider(transport, network);
+  // Obtenir le signer pour le compte connecté
   return provider.getSigner(account.address);
 }
 
@@ -89,15 +92,15 @@ function MainContent() {
   const [tokenList, setTokenList] = useState([]);
   const [loadingTokens, setLoadingTokens] = useState(false);
 
-  // Historique des transactions
   const [history, setHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const { address: account, isConnected } = useAccount();
   const { data: walletClient } = useWalletClient();
   const { switchChain } = useSwitchChain();
+  const chainId = useChainId();
 
-  // ----- Conversion du WalletClient en Signer ethers -----
+  // Surveiller l'état du signer et du contrat
   useEffect(() => {
     if (!isConnected || !walletClient) {
       setSigner(null);
@@ -113,7 +116,6 @@ function MainContent() {
     }
   }, [isConnected, walletClient]);
 
-  // ----- Création du contrat ethers -----
   useEffect(() => {
     if (!isConnected || !signer) {
       setContract(null);
@@ -144,7 +146,6 @@ function MainContent() {
     setBalance(ethers.utils.formatUnits(bal, 18));
   }, [contract, account]);
 
-  // ----- Changement de réseau avec wagmi -----
   const switchToSepolia = () => {
     if (switchChain) {
       switchChain({ chainId: 11155111 });
@@ -178,7 +179,16 @@ function MainContent() {
   };
 
   const handleTransfer = async () => {
-    if (!contract || !transferTo || !transferAmount) return;
+    // Vérifications supplémentaires avant envoi
+    if (!contract || !signer) {
+      toast.error('Wallet non prêt. Veuillez attendre la connexion complète.');
+      return;
+    }
+    if (chainId !== 11155111) {
+      toast.error('Vous devez être sur le réseau Sepolia. Allez dans Paramètres pour basculer.');
+      return;
+    }
+    if (!transferTo || !transferAmount) return;
     try {
       const tx = await contract.transfer(transferTo, ethers.utils.parseUnits(transferAmount, 18));
       toast.success('Transfert en cours...');
@@ -193,7 +203,15 @@ function MainContent() {
   };
 
   const handleMint = async () => {
-    if (!contract || !mintTo || !mintAmount) return;
+    if (!contract || !signer) {
+      toast.error('Wallet non prêt.');
+      return;
+    }
+    if (chainId !== 11155111) {
+      toast.error('Vous devez être sur Sepolia.');
+      return;
+    }
+    if (!mintTo || !mintAmount) return;
     try {
       const tx = await contract.mint(mintTo, ethers.utils.parseUnits(mintAmount, 18));
       toast.success('Mint en cours...');
@@ -215,7 +233,7 @@ function MainContent() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // ----- Récupération des tokens -----
+  // Récupération des tokens détenus via Etherscan
   const fetchTokenList = async () => {
     if (!account || !walletClient) return;
     const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
@@ -231,7 +249,6 @@ function MainContent() {
 
       const contractsData = [];
 
-      // Ajouter SGC en priorité
       const provider = new ethers.providers.Web3Provider(walletClient.transport);
       const sgcContract = new ethers.Contract(TOKEN_ADDRESS, ABI, provider);
       const sgcBalance = await sgcContract.balanceOf(account);
@@ -243,7 +260,6 @@ function MainContent() {
         });
       }
 
-      // Traiter les autres tokens
       if (data.status === '1' && data.result) {
         const tokenAddresses = [...new Set(data.result.map(tx => tx.contractAddress))];
         const minABI = ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)', 'function decimals() view returns (uint8)'];
@@ -262,7 +278,7 @@ function MainContent() {
                 balance: ethers.utils.formatUnits(bal, decimals),
               });
             }
-          } catch (e) { /* ignorer les non-ERC20 */ }
+          } catch (e) { /* ignorer */ }
         }
       }
 
@@ -274,7 +290,7 @@ function MainContent() {
     }
   };
 
-  // ----- Historique des transactions (10 dernières) -----
+  // Historique des transactions
   const fetchHistory = async () => {
     if (!account || !walletClient) return;
     const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
@@ -321,21 +337,28 @@ function MainContent() {
     }
   }, [isConnected, activeTab]);
 
-  // ----- Rendu des onglets -----
   const renderTabContent = () => {
     switch (activeTab) {
       case 'send':
         return (
           <div className="space-y-4">
             <h3 className="text-lg font-semibold text-gray-800">Envoyer des SGC</h3>
+            {chainId !== 11155111 && (
+              <p className="text-xs text-red-500 mb-2">
+                Vous n'êtes pas sur le réseau Sepolia. Les transactions sont désactivées.
+              </p>
+            )}
             <input type="text" placeholder="Adresse destinataire" value={transferTo}
               onChange={e => setTransferTo(e.target.value)}
               className="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
             <input type="number" placeholder="Montant" value={transferAmount}
               onChange={e => setTransferAmount(e.target.value)}
               className="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
-            <button onClick={handleTransfer}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg shadow transition">
+            <button
+              onClick={handleTransfer}
+              disabled={!signer || chainId !== 11155111}
+              className={`w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg shadow transition ${(!signer || chainId !== 11155111) ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
               Envoyer
             </button>
           </div>
