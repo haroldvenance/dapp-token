@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
 import toast, { Toaster } from 'react-hot-toast';
 import QRCode from 'qrcode.react';
+import NftMarketplace from './components/NftMarketplace';
 
 import { WagmiProvider } from 'wagmi';
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query';
@@ -490,6 +491,9 @@ function MainContent() {
             </a>
           </div>
         );
+		
+	  case 'nft':
+        return <NftMarketplace signer={signer} account={account} />;
 
       case 'settings':
         return (
@@ -551,6 +555,7 @@ function MainContent() {
                     { key: 'tokens', label: 'Jetons' },
                     { key: 'history', label: 'Historique' },
                     { key: 'settings', label: 'Paramètres' },
+					{ key: 'nft', label: 'NFT' },
                   ].map(tab => (
                     <button
                       key={tab.key}
