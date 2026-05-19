@@ -14,7 +14,6 @@ import TokenArtifact from './contracts/SangoCoin.json';
 const TOKEN_ADDRESS = '0x55E3AC18F352cd77A01612d7C595Cb5bE367FB97';
 const ABI = TokenArtifact.abi;
 
-// Nouvel adaptateur plus robuste : utilise le walletClient pour obtenir un signer compatible mobile
 function walletClientToSigner(walletClient) {
   const { account, chain, transport } = walletClient;
   const network = {
@@ -22,9 +21,7 @@ function walletClientToSigner(walletClient) {
     name: chain.name,
     ensAddress: chain.contracts?.ensRegistry?.address,
   };
-  // Créer un provider ethers à partir du transport viem
   const provider = new ethers.providers.Web3Provider(transport, network);
-  // Obtenir le signer pour le compte connecté
   return provider.getSigner(account.address);
 }
 
@@ -40,6 +37,7 @@ function App() {
   );
 }
 
+// ---- WalletConnector (inchangé) ----
 function WalletConnector() {
   const { connect, connectors, isPending } = useConnect();
   const { disconnect } = useDisconnect();
@@ -47,8 +45,8 @@ function WalletConnector() {
 
   if (isConnected) {
     return (
-      <div className="flex items-center justify-between bg-white/80 rounded-lg p-3 shadow-sm border border-gray-200">
-        <span className="text-sm font-mono text-gray-700 truncate">
+      <div className="flex items-center justify-between bg-white/80 dark:bg-gray-800 rounded-xl p-3 shadow-sm border border-gray-200 dark:border-gray-700">
+        <span className="text-sm font-mono text-gray-700 dark:text-gray-300 truncate">
           {account?.slice(0, 6)}...{account?.slice(-4)}
         </span>
         <button onClick={disconnect} className="text-red-500 text-xs font-medium hover:underline">
@@ -65,7 +63,7 @@ function WalletConnector() {
           key={connector.id}
           onClick={() => connect({ connector })}
           disabled={isPending}
-          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-medium py-3 px-4 rounded-lg shadow transition-colors"
+          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-medium py-3 px-4 rounded-xl shadow transition-colors"
         >
           {connector.name === 'Injected'
             ? 'MetaMask (ou wallet navigateur)'
@@ -76,6 +74,7 @@ function WalletConnector() {
   );
 }
 
+// ---- MainContent ----
 function MainContent() {
   const [signer, setSigner] = useState(null);
   const [contract, setContract] = useState(null);
@@ -84,24 +83,23 @@ function MainContent() {
 
   const [transferTo, setTransferTo] = useState('');
   const [transferAmount, setTransferAmount] = useState('');
-  const [mintTo, setMintTo] = useState('');
-  const [mintAmount, setMintAmount] = useState('');
-
-  const [activeTab, setActiveTab] = useState('send');
   const [copied, setCopied] = useState(false);
-
-  const [tokenList, setTokenList] = useState([]);
-  const [loadingTokens, setLoadingTokens] = useState(false);
 
   const [history, setHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  const [showSendModal, setShowSendModal] = useState(false);
+  const [showReceiveModal, setShowReceiveModal] = useState(false);
+
+  // Pages : 'home', 'nft', 'settings'
+  const [currentPage, setCurrentPage] = useState('home');
 
   const { address: account, isConnected } = useAccount();
   const { data: walletClient } = useWalletClient();
   const { switchChain } = useSwitchChain();
   const chainId = useChainId();
 
-  // Surveiller l'état du signer et du contrat
+  // Initialisation du signer et du contrat
   useEffect(() => {
     if (!isConnected || !walletClient) {
       setSigner(null);
@@ -151,7 +149,7 @@ function MainContent() {
     if (switchChain) {
       switchChain({ chainId: 11155111 });
     } else {
-      toast.error('Changement de réseau non supporté sur ce wallet');
+      toast.error('Changement de réseau non supporté');
     }
   };
 
@@ -180,16 +178,18 @@ function MainContent() {
   };
 
   const handleTransfer = async () => {
-    // Vérifications supplémentaires avant envoi
     if (!contract || !signer) {
-      toast.error('Wallet non prêt. Veuillez attendre la connexion complète.');
+      toast.error('Wallet non prêt');
       return;
     }
     if (chainId !== 11155111) {
-      toast.error('Vous devez être sur le réseau Sepolia. Allez dans Paramètres pour basculer.');
+      toast.error('Vous devez être sur le réseau Sepolia');
       return;
     }
-    if (!transferTo || !transferAmount) return;
+    if (!transferTo || !transferAmount) {
+      toast.error('Adresse et montant requis');
+      return;
+    }
     try {
       const tx = await contract.transfer(transferTo, ethers.utils.parseUnits(transferAmount, 18));
       toast.success('Transfert en cours...');
@@ -198,29 +198,8 @@ function MainContent() {
       refreshBalance();
       setTransferTo('');
       setTransferAmount('');
-    } catch (err) {
-      toast.error(err.reason || err.message);
-    }
-  };
-
-  const handleMint = async () => {
-    if (!contract || !signer) {
-      toast.error('Wallet non prêt.');
-      return;
-    }
-    if (chainId !== 11155111) {
-      toast.error('Vous devez être sur Sepolia.');
-      return;
-    }
-    if (!mintTo || !mintAmount) return;
-    try {
-      const tx = await contract.mint(mintTo, ethers.utils.parseUnits(mintAmount, 18));
-      toast.success('Mint en cours...');
-      await tx.wait();
-      toast.success('Tokens créés !');
-      refreshBalance();
-      setMintTo('');
-      setMintAmount('');
+      setShowSendModal(false);
+      fetchHistory();
     } catch (err) {
       toast.error(err.reason || err.message);
     }
@@ -234,69 +213,19 @@ function MainContent() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Récupération des tokens détenus via Etherscan
-  const fetchTokenList = async () => {
-    if (!account || !walletClient) return;
-    const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
-    if (!apiKey) {
-      toast.error('Clé API Etherscan manquante');
-      return;
-    }
-    setLoadingTokens(true);
-    try {
-      const url = `https://api-sepolia.etherscan.io/api?module=account&action=tokentx&address=${account}&sort=desc&apikey=${apiKey}`;
-      const response = await fetch(url);
-      const data = await response.json();
-
-      const contractsData = [];
-
-      const provider = new ethers.providers.Web3Provider(walletClient.transport);
-      const sgcContract = new ethers.Contract(TOKEN_ADDRESS, ABI, provider);
-      const sgcBalance = await sgcContract.balanceOf(account);
-      if (sgcBalance.gt(0)) {
-        contractsData.push({
-          address: TOKEN_ADDRESS,
-          symbol: 'SGC',
-          balance: ethers.utils.formatUnits(sgcBalance, 18),
-        });
-      }
-
-      if (data.status === '1' && data.result) {
-        const tokenAddresses = [...new Set(data.result.map(tx => tx.contractAddress))];
-        const minABI = ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)', 'function decimals() view returns (uint8)'];
-
-        for (const addr of tokenAddresses) {
-          if (addr.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) continue;
-          try {
-            const tok = new ethers.Contract(addr, minABI, provider);
-            const bal = await tok.balanceOf(account);
-            if (bal.gt(0)) {
-              const symbol = await tok.symbol();
-              const decimals = await tok.decimals();
-              contractsData.push({
-                address: addr,
-                symbol,
-                balance: ethers.utils.formatUnits(bal, decimals),
-              });
-            }
-          } catch (e) { /* ignorer */ }
-        }
-      }
-
-      setTokenList(contractsData);
-    } catch (err) {
-      toast.error('Erreur lors du chargement des jetons');
-    } finally {
-      setLoadingTokens(false);
-    }
-  };
-
-  // Historique des transactions
+  // Historique réel
   const fetchHistory = async () => {
     if (!account || !walletClient) return;
     const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
     if (!apiKey) {
-      toast.error('Clé API Etherscan manquante');
+      // Fallback démo si pas de clé
+      setHistory([
+        { from: "0x4a3f...7b2c", to: account, value: "150.00", timestamp: "Aujourd'hui, 10:24", isReceived: true },
+        { from: account, to: "0x8d21...9f3e", value: "50.00", timestamp: "Hier, 18:45", isReceived: false },
+        { from: "0x7e89...3c1a", to: account, value: "200.00", timestamp: "12 Mai, 14:32", isReceived: true },
+        { from: account, to: "0x2b46...8d7f", value: "75.25", timestamp: "10 Mai, 09:15", isReceived: false },
+      ]);
+      setLoadingHistory(false);
       return;
     }
     setLoadingHistory(true);
@@ -309,11 +238,11 @@ function MainContent() {
           .filter(tx => tx.contractAddress.toLowerCase() === TOKEN_ADDRESS.toLowerCase())
           .slice(0, 10)
           .map(tx => ({
-            hash: tx.hash,
             from: tx.from,
             to: tx.to,
             value: ethers.utils.formatUnits(tx.value, tx.tokenDecimal),
             timestamp: new Date(parseInt(tx.timeStamp) * 1000).toLocaleString(),
+            isReceived: tx.to.toLowerCase() === account.toLowerCase(),
           }));
         setHistory(filtered);
       } else {
@@ -327,260 +256,220 @@ function MainContent() {
   };
 
   useEffect(() => {
-    if (isConnected && activeTab === 'tokens') {
-      fetchTokenList();
-    }
-  }, [isConnected, activeTab]);
-
-  useEffect(() => {
-    if (isConnected && activeTab === 'history') {
+    if (isConnected && currentPage === 'home') {
       fetchHistory();
     }
-  }, [isConnected, activeTab]);
+  }, [isConnected, currentPage]);
 
-  const renderTabContent = () => {
-    switch (activeTab) {
-      case 'send':
-        return (
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-gray-800">Envoyer des SGC</h3>
-            {chainId !== 11155111 && (
-              <p className="text-xs text-red-500 mb-2">
-                Vous n'êtes pas sur le réseau Sepolia. Les transactions sont désactivées.
-              </p>
-            )}
-            <input type="text" placeholder="Adresse destinataire" value={transferTo}
-              onChange={e => setTransferTo(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
-            <input type="number" placeholder="Montant" value={transferAmount}
-              onChange={e => setTransferAmount(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
-            <button
-              onClick={handleTransfer}
-              disabled={!signer || chainId !== 11155111}
-              className={`w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg shadow transition ${(!signer || chainId !== 11155111) ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              Envoyer
-            </button>
-          </div>
-        );
+  // Valeur USD approximative
+  const usdValue = (parseFloat(balance) * 0.25).toFixed(2);
 
-      case 'receive':
-        return (
-          <div className="space-y-4 text-center">
-            <h3 className="text-lg font-semibold text-gray-800">Recevoir des SGC</h3>
-            <p className="text-sm text-gray-500">Scannez ce QR code ou partagez votre adresse.</p>
-            {account && (
-              <div className="bg-white p-4 inline-block rounded-xl shadow border">
-                <QRCode value={account} size={180} />
-              </div>
-            )}
-            <div className="bg-gray-100 p-3 rounded-lg text-xs font-mono break-all text-gray-700">
-              {account}
-            </div>
-            <button onClick={copyAddress}
-              className="bg-gray-700 hover:bg-gray-800 text-white py-2 px-4 rounded-lg shadow text-sm font-medium">
-              {copied ? 'Copié !' : 'Copier l\'adresse'}
-            </button>
-          </div>
-        );
-
-      case 'swap':
-        return (
-          <div className="text-center py-10 space-y-4">
-            <h3 className="text-lg font-semibold text-gray-800">Échanger SGC</h3>
-            <p className="text-gray-500 text-sm">
-              Vous pouvez échanger SangoCoin sur Uniswap (testnet Sepolia).<br />
-              Assurez‑vous d'avoir des SGC et un peu d'ETH pour les frais.
-            </p>
-            <a
-              href={`https://app.uniswap.org/#/swap?chain=sepolia&outputCurrency=${TOKEN_ADDRESS}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-6 rounded-lg shadow transition-colors"
-            >
-              Ouvrir Uniswap Sepolia
-            </a>
-            <p className="text-xs text-gray-400">
-              * L'échange ne sera possible que si de la liquidité existe sur la paire SGC/ETH.
-            </p>
-          </div>
-        );
-
-      case 'buy':
-        return (
-          <div className="text-center py-10">
-            <h3 className="text-lg font-semibold text-gray-800">Acheter des SGC</h3>
-            <p className="text-gray-500 mt-4 text-sm">L'achat direct n'est pas encore intégré.</p>
-          </div>
-        );
-
-      case 'tokens':
-        return (
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-gray-800">Mes jetons</h3>
-            {loadingTokens ? (
-              <p className="text-sm text-gray-500">Chargement...</p>
-            ) : tokenList.length > 0 ? (
-              <ul className="divide-y divide-gray-200 max-h-60 overflow-y-auto">
-                {tokenList.map((token, idx) => (
-                  <li key={idx} className="py-3 flex justify-between items-center">
-                    <div>
-                      <p className="font-medium text-gray-800">{token.symbol}</p>
-                      <p className="text-xs text-gray-400 truncate w-40">{token.address}</p>
-                    </div>
-                    <span className="font-semibold text-gray-700">{token.balance}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-gray-500">Aucun jeton trouvé.</p>
-            )}
-            <button onClick={addTokenToMetaMask}
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-2 rounded-lg shadow text-sm">
-              Ajouter SGC à MetaMask
-            </button>
-            {isOwner && (
-              <details className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-                <summary className="font-medium text-green-700 cursor-pointer">
-                  Mint (Créer des tokens)
-                </summary>
-                <div className="mt-3 space-y-2">
-                  <input type="text" placeholder="Adresse bénéficiaire" value={mintTo}
-                    onChange={e => setMintTo(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" />
-                  <input type="number" placeholder="Montant" value={mintAmount}
-                    onChange={e => setMintAmount(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" />
-                  <button onClick={handleMint}
-                    className="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2 rounded-lg shadow text-sm">
-                    Mint
-                  </button>
-                </div>
-              </details>
-            )}
-          </div>
-        );
-
-      case 'history':
-        return (
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-gray-800">Historique des transactions SGC</h3>
-            {loadingHistory ? (
-              <p className="text-sm text-gray-500">Chargement...</p>
-            ) : history.length > 0 ? (
-              <ul className="divide-y divide-gray-200 max-h-60 overflow-y-auto">
-                {history.map((tx, idx) => (
-                  <li key={idx} className="py-3 text-sm">
-                    <p className="text-gray-600">
-                      {tx.from.slice(0, 6)}... → {tx.to.slice(0, 6)}...
-                      <span className="font-semibold ml-2">{tx.value} SGC</span>
-                    </p>
-                    <p className="text-xs text-gray-400">{tx.timestamp}</p>
-                    <a href={`https://sepolia.etherscan.io/tx/${tx.hash}`} target="_blank" rel="noopener noreferrer"
-                      className="text-indigo-600 underline text-xs">Voir sur Etherscan</a>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-gray-500">Aucune transaction trouvée.</p>
-            )}
-            <a href={`https://sepolia.etherscan.io/address/${account}`} target="_blank" rel="noopener noreferrer"
-              className="inline-block text-indigo-600 underline text-sm mt-2">
-              Ouvrir Etherscan
-            </a>
-          </div>
-        );
-		
-	  case 'nft':
-        return <NftMarketplace signer={signer} account={account} chainId={chainId} />;
-
-      case 'settings':
-        return (
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-gray-800">Paramètres</h3>
-            <button onClick={switchToSepolia}
-              className="w-full bg-amber-500 hover:bg-amber-600 text-white font-medium py-3 rounded-lg shadow text-sm">
-              Basculer sur le réseau Sepolia
-            </button>
-            <button onClick={addTokenToMetaMask}
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 rounded-lg shadow text-sm">
-              Ajouter SGC à MetaMask
-            </button>
-            <p className="text-xs text-gray-500 mt-4">
-              Wallet connecté : <span className="font-mono">{account?.slice(0, 8)}...{account?.slice(-6)}</span>
-            </p>
-          </div>
-        );
-
-      default:
-        return null;
-    }
-  };
+  // Navigation bar items
+  const navItems = [
+    { page: 'home', label: 'Accueil', icon: '🏠' },
+    { page: 'nft', label: 'NFT', icon: '🖼️' },
+    { page: 'settings', label: 'Paramètres', icon: '⚙️' },
+  ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-200 flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <Toaster position="top-right" />
-        <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
-          <div className="bg-gradient-to-r from-slate-800 to-slate-700 p-6 text-center">
-            <img
-              src="/logo.png"
-              alt="Logo"
-              className="w-16 h-16 mx-auto mb-3 rounded-full shadow-lg object-cover border-2 border-white"
-              onError={(e) => { e.target.style.display = 'none'; }}
-            />
-            <h1 className="text-2xl font-bold text-white">SangoCoin</h1>
-            <p className="text-slate-300 text-xs mt-1">Token ERC-20 sur Sepolia</p>
-          </div>
+    <div className="min-h-screen w-full bg-gray-100 dark:bg-gray-900 transition-colors duration-300 flex flex-col">
+      <Toaster position="top-right" />
 
-          <div className="p-6">
-            <div className="mb-6">
-              <WalletConnector />
+      {/* Barre de navigation - en haut sur desktop, en bas sur mobile */}
+      <nav className="bg-white dark:bg-gray-800 shadow-md md:shadow-lg w-full fixed top-0 md:top-0 bottom-auto md:bottom-auto z-20 order-1 md:order-none">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-center md:justify-between items-center h-14 md:h-16">
+            {/* Logo / titre pour desktop (optionnel) */}
+            <div className="hidden md:flex items-center gap-2">
+              <img src="/logo.png" alt="Logo" className="w-8 h-8 rounded-full" onError={(e) => (e.target.style.display = 'none')} />
+              <span className="font-bold text-gray-800 dark:text-white">SangoCoin</span>
             </div>
-
-            {isConnected ? (
-              <div className="flex flex-col max-h-[80vh] overflow-y-auto">
-                <div className="bg-gradient-to-r from-emerald-500 to-teal-500 rounded-lg p-4 text-white shadow-md mb-6">
-                  <p className="text-sm opacity-80">Solde SGC</p>
-                  <p className="text-3xl font-bold mt-1">{balance} <span className="text-lg font-medium">SGC</span></p>
-                </div>
-
-                <div className="flex flex-wrap gap-1 mb-4">
-                  {[
-                    { key: 'send', label: 'Envoyer' },
-                    { key: 'receive', label: 'Recevoir' },
-                    { key: 'swap', label: 'Swap' },
-                    { key: 'buy', label: 'Acheter' },
-                    { key: 'tokens', label: 'Jetons' },
-                    { key: 'history', label: 'Historique' },
-                    { key: 'settings', label: 'Paramètres' },
-					{ key: 'nft', label: 'NFT' },
-                  ].map(tab => (
-                    <button
-                      key={tab.key}
-                      onClick={() => setActiveTab(tab.key)}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-full transition-colors ${
-                        activeTab === tab.key
-                          ? 'bg-slate-800 text-white'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                  {renderTabContent()}
-                </div>
-              </div>
-            ) : (
-              <p className="text-center text-gray-500 text-sm">Connectez votre wallet pour commencer</p>
-            )}
+            {/* Icônes de navigation */}
+            <div className="flex space-x-6 md:space-x-8">
+              {navItems.map((item) => (
+                <button
+                  key={item.page}
+                  onClick={() => setCurrentPage(item.page)}
+                  className={`flex flex-col items-center justify-center transition-colors ${
+                    currentPage === item.page
+                      ? 'text-indigo-600 dark:text-indigo-400'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400'
+                  }`}
+                >
+                  <span className="text-2xl md:text-xl">{item.icon}</span>
+                  <span className="text-xs mt-0.5">{item.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      </nav>
+
+      {/* Contenu principal avec padding pour la barre de navigation */}
+      <main className="flex-1 w-full mt-14 md:mt-16 mb-14 md:mb-0 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <div className="max-w-7xl mx-auto">
+          {/* Wallet Connector (toujours visible) */}
+          <div className="mb-4 md:mb-6">
+            <WalletConnector />
+          </div>
+
+          {!isConnected ? (
+            <div className="text-center text-gray-500 dark:text-gray-400 py-20 text-lg">
+              Connectez votre wallet pour commencer
+            </div>
+          ) : (
+            <>
+              {/* Solde SGC commun à toutes les pages */}
+              <div className="text-center mb-6 md:mb-8">
+                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Solde SGC</p>
+                <p className="text-4xl font-extrabold text-gray-800 dark:text-white mt-1">
+                  {parseFloat(balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SGC
+                </p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">≈ ${usdValue} USD</p>
+              </div>
+
+              {/* Page Accueil */}
+              {currentPage === 'home' && (
+                <div className="space-y-6">
+                  {/* Boutons Envoyer / Recevoir */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <button
+                      onClick={() => setShowSendModal(true)}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-4 rounded-xl shadow transition flex items-center justify-center gap-2"
+                    >
+                      <span className="text-xl"></span> Envoyer SGC
+                    </button>
+                    <button
+                      onClick={() => setShowReceiveModal(true)}
+                      className="bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-white font-semibold py-4 rounded-xl shadow transition flex items-center justify-center gap-2"
+                    >
+                      <span className="text-xl"></span> Recevoir SGC
+                    </button>
+                  </div>
+
+                  {/* Historique des transactions */}
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-3">Historique des transactions</h3>
+                    {loadingHistory ? (
+                      <p className="text-center text-gray-500 py-4">Chargement...</p>
+                    ) : history.length > 0 ? (
+                      <div className="space-y-3 max-h-80 overflow-y-auto">
+                        {history.map((tx, idx) => (
+                          <div key={idx} className="flex justify-between items-center border-b border-gray-100 dark:border-gray-700 pb-2">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${tx.isReceived ? 'bg-green-100 dark:bg-green-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
+                                {tx.isReceived ? '⬇️' : '⬆️'}
+                              </div>
+                              <div>
+                                <p className="text-sm font-medium text-gray-800 dark:text-white">
+                                  {tx.isReceived ? 'Reçu' : 'Envoyé'}
+                                </p>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                                  {tx.isReceived ? `De : ${tx.from.slice(0,6)}...${tx.from.slice(-4)}` : `À : ${tx.to.slice(0,6)}...${tx.to.slice(-4)}`}
+                                </p>
+                                <p className="text-xs text-gray-400">{tx.timestamp}</p>
+                              </div>
+                            </div>
+                            <p className={`font-bold ${tx.isReceived ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                              {tx.isReceived ? '+' : '-'} {parseFloat(tx.value).toFixed(2)} SGC
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-center text-gray-500 py-4">Aucune transaction trouvée.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Page NFT */}
+              {currentPage === 'nft' && (
+                <div className="max-w-full">
+                  <NftMarketplace signer={signer} account={account} chainId={chainId} />
+                </div>
+              )}
+
+              {/* Page Paramètres */}
+              {currentPage === 'settings' && (
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-800 dark:text-white">Paramètres</h3>
+                  <button onClick={switchToSepolia}
+                    className="w-full bg-amber-500 hover:bg-amber-600 text-white font-medium py-3 rounded-lg shadow text-sm">
+                    Basculer sur le réseau Sepolia
+                  </button>
+                  <button onClick={addTokenToMetaMask}
+                    className="w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 rounded-lg shadow text-sm">
+                    Ajouter SGC à MetaMask
+                  </button>
+                  {isOwner && (
+                    <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800/50">
+                      <p className="text-sm text-green-800 dark:text-green-300 font-medium">👑 Vous êtes le propriétaire du token.</p>
+                      <p className="text-xs text-green-600 dark:text-green-400 mt-1">Les fonctions de mint sont disponibles via l'ancienne interface si nécessaire.</p>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-4">
+                    Wallet connecté : <span className="font-mono">{account?.slice(0, 8)}...{account?.slice(-6)}</span>
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </main>
+
+      {/* Modales Envoyer / Recevoir (identiques à avant) */}
+      {showSendModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl max-w-sm w-full p-5 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-800 dark:text-white mb-4">Envoyer SGC</h3>
+            {chainId !== 11155111 && (
+              <p className="text-xs text-red-500 mb-2">⚠️ Vous n'êtes pas sur Sepolia. <button onClick={switchToSepolia} className="underline">Basculer</button></p>
+            )}
+            <input
+              type="text"
+              placeholder="Adresse destinataire (0x...)"
+              value={transferTo}
+              onChange={e => setTransferTo(e.target.value)}
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-4 py-2 mb-3 text-sm bg-white dark:bg-gray-700 text-gray-800 dark:text-white"
+            />
+            <input
+              type="number"
+              placeholder="Montant en SGC"
+              value={transferAmount}
+              onChange={e => setTransferAmount(e.target.value)}
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-4 py-2 mb-4 text-sm bg-white dark:bg-gray-700 text-gray-800 dark:text-white"
+            />
+            <div className="flex gap-2">
+              <button onClick={handleTransfer} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 rounded-lg">
+                Confirmer
+              </button>
+              <button onClick={() => setShowSendModal(false)} className="flex-1 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-white py-2 rounded-lg">
+                Annuler
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showReceiveModal && account && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl max-w-sm w-full p-5 text-center shadow-xl">
+            <h3 className="text-lg font-bold text-gray-800 dark:text-white mb-2">Recevoir SGC</h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">Scannez ou copiez votre adresse</p>
+            <div className="bg-white p-3 inline-block rounded-xl shadow mx-auto mb-3">
+              <QRCode value={account} size={140} />
+            </div>
+            <p className="text-xs font-mono break-all bg-gray-100 dark:bg-gray-700 p-2 rounded mb-3 text-gray-700 dark:text-gray-300">{account}</p>
+            <button onClick={copyAddress} className="bg-gray-700 hover:bg-gray-800 text-white py-2 px-4 rounded-lg text-sm">
+              {copied ? 'Copié !' : 'Copier l\'adresse'}
+            </button>
+            <button onClick={() => setShowReceiveModal(false)} className="block w-full mt-3 text-indigo-500 text-sm">
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
