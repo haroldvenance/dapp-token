@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
 import toast from 'react-hot-toast';
 
@@ -31,17 +31,16 @@ const TOKEN_ADDRESS = "0x55E3AC18F352cd77A01612d7C595Cb5bE367FB97";
 
 const TOTAL_NFTS = 10; // NFT #0 à #9
 
-function NftMarketplace({ signer, account }) {
+function NftMarketplace({ signer, account, chainId }) {
   const [nfts, setNfts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingAction, setLoadingAction] = useState({}); // tokenId -> true/false
+  const [listPrices, setListPrices] = useState({}); // tokenId -> prix saisi
 
   // Charger les métadonnées des 10 NFTs
-  useEffect(() => {
+  const loadNFTs = useCallback(async () => {
     if (!signer) return;
-    loadNFTs();
-  }, [signer]);
-
-  async function loadNFTs() {
+    setLoading(true);
     try {
       const nftContract = new ethers.Contract(NFT_ADDRESS, NFT_ABI, signer);
       const marketContract = new ethers.Contract(MARKET_ADDRESS, MARKET_ABI, signer);
@@ -69,7 +68,6 @@ function NftMarketplace({ signer, account }) {
             const httpUri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
             const resp = await fetch(httpUri);
             if (resp.ok) metadata = await resp.json();
-            // Convertir l'image IPFS en URL HTTP
             if (metadata.image && metadata.image.startsWith('ipfs://')) {
               metadata.image = metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/');
             }
@@ -93,15 +91,25 @@ function NftMarketplace({ signer, account }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [signer]);
+
+  useEffect(() => {
+    loadNFTs();
+  }, [loadNFTs]);
+
+  // Indique si l'action est en cours pour un token donné
+  const isActionLoading = (tokenId) => !!loadingAction[tokenId];
 
   // Lister un NFT
-  async function handleList(tokenId, price) {
+  const handleList = async (tokenId) => {
+    const price = listPrices[tokenId];
+    if (!price) return toast.error('Veuillez entrer un prix');
     if (!signer) return;
+    setLoadingAction(prev => ({ ...prev, [tokenId]: true }));
     try {
       const nftContract = new ethers.Contract(NFT_ADDRESS, NFT_ABI, signer);
       const marketContract = new ethers.Contract(MARKET_ADDRESS, MARKET_ABI, signer);
-      // 1. Approbation du marketplace pour le NFT
+      // 1. Approbation
       const approved = await nftContract.getApproved(tokenId);
       if (approved.toLowerCase() !== MARKET_ADDRESS.toLowerCase()) {
         const txApprove = await nftContract.approve(MARKET_ADDRESS, tokenId);
@@ -113,19 +121,24 @@ function NftMarketplace({ signer, account }) {
       const txList = await marketContract.listNFT(tokenId, priceWei);
       await txList.wait();
       toast.success('NFT listé avec succès');
-      loadNFTs(); // recharge
+      // Réinitialiser le prix saisi
+      setListPrices(prev => ({ ...prev, [tokenId]: '' }));
+      await loadNFTs();
     } catch (err) {
       toast.error(err.reason || err.message);
+    } finally {
+      setLoadingAction(prev => ({ ...prev, [tokenId]: false }));
     }
-  }
+  };
 
   // Acheter un NFT
-  async function handleBuy(tokenId, priceWei) {
+  const handleBuy = async (tokenId, priceWei) => {
     if (!signer) return;
+    setLoadingAction(prev => ({ ...prev, [tokenId]: true }));
     try {
       const marketContract = new ethers.Contract(MARKET_ADDRESS, MARKET_ABI, signer);
       const tokenContract = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
-      // 1. Approbation SGC pour le marketplace
+      // 1. Approbation SGC
       const allowance = await tokenContract.allowance(account, MARKET_ADDRESS);
       if (allowance.lt(priceWei)) {
         const txApprove = await tokenContract.approve(MARKET_ADDRESS, priceWei);
@@ -136,27 +149,53 @@ function NftMarketplace({ signer, account }) {
       const txBuy = await marketContract.buyNFT(tokenId);
       await txBuy.wait();
       toast.success('NFT acheté !');
-      loadNFTs();
+      await loadNFTs();
     } catch (err) {
       toast.error(err.reason || err.message);
+    } finally {
+      setLoadingAction(prev => ({ ...prev, [tokenId]: false }));
     }
-  }
+  };
 
   // Annuler une vente
-  async function handleCancel(tokenId) {
+  const handleCancel = async (tokenId) => {
     if (!signer) return;
+    setLoadingAction(prev => ({ ...prev, [tokenId]: true }));
     try {
       const marketContract = new ethers.Contract(MARKET_ADDRESS, MARKET_ABI, signer);
       const tx = await marketContract.cancelListing(tokenId);
       await tx.wait();
       toast.success('Vente annulée');
-      loadNFTs();
+      await loadNFTs();
     } catch (err) {
       toast.error(err.reason || err.message);
+    } finally {
+      setLoadingAction(prev => ({ ...prev, [tokenId]: false }));
     }
+  };
+
+  // Vérification réseau
+  if (chainId && chainId !== 11155111) {
+    return (
+      <div className="text-center py-10">
+        <p className="text-red-500 font-medium">Vous n'êtes pas sur le réseau Sepolia.</p>
+        <p className="text-sm text-gray-500 mt-2">Allez dans Paramètres pour basculer.</p>
+      </div>
+    );
   }
 
-  if (loading) return <p className="text-center text-gray-500">Chargement des NFTs...</p>;
+  if (!signer) {
+    return <p className="text-center text-gray-500">Connectez votre wallet pour voir les NFTs.</p>;
+  }
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center py-20">
+        <div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-500 border-t-transparent"></div>
+        <span className="ml-3 text-gray-600">Chargement des NFTs...</span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -184,16 +223,26 @@ function NftMarketplace({ signer, account }) {
                 {item.owner.toLowerCase() === account?.toLowerCase() ? (
                   <button
                     onClick={() => handleCancel(item.tokenId)}
-                    className="mt-1 w-full bg-red-500 text-white text-xs py-1 rounded hover:bg-red-600"
+                    disabled={isActionLoading(item.tokenId)}
+                    className={`mt-1 w-full text-white text-xs py-1 rounded transition ${
+                      isActionLoading(item.tokenId)
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-red-500 hover:bg-red-600'
+                    }`}
                   >
-                    Annuler vente
+                    {isActionLoading(item.tokenId) ? '⏳...' : 'Annuler vente'}
                   </button>
                 ) : (
                   <button
                     onClick={() => handleBuy(item.tokenId, item.listing.rawPrice)}
-                    className="mt-1 w-full bg-indigo-600 text-white text-xs py-1 rounded hover:bg-indigo-700"
+                    disabled={isActionLoading(item.tokenId)}
+                    className={`mt-1 w-full text-white text-xs py-1 rounded transition ${
+                      isActionLoading(item.tokenId)
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-indigo-600 hover:bg-indigo-700'
+                    }`}
                   >
-                    Acheter
+                    {isActionLoading(item.tokenId) ? '⏳...' : 'Acheter'}
                   </button>
                 )}
               </div>
@@ -204,17 +253,21 @@ function NftMarketplace({ signer, account }) {
                     <input
                       type="number"
                       placeholder="Prix en SGC"
-                      className="w-full text-xs border rounded px-2 py-1 mb-1"
-                      id={`price-${item.tokenId}`}
+                      value={listPrices[item.tokenId] || ''}
+                      onChange={(e) => setListPrices(prev => ({ ...prev, [item.tokenId]: e.target.value }))}
+                      className="w-full text-xs border rounded px-2 py-1 mb-1 focus:ring-2 focus:ring-green-400 outline-none"
+                      disabled={isActionLoading(item.tokenId)}
                     />
                     <button
-                      onClick={() => {
-                        const price = document.getElementById(`price-${item.tokenId}`).value;
-                        if (price) handleList(item.tokenId, price);
-                      }}
-                      className="w-full bg-green-600 text-white text-xs py-1 rounded hover:bg-green-700"
+                      onClick={() => handleList(item.tokenId)}
+                      disabled={isActionLoading(item.tokenId) || !listPrices[item.tokenId]}
+                      className={`w-full text-white text-xs py-1 rounded transition ${
+                        isActionLoading(item.tokenId) || !listPrices[item.tokenId]
+                          ? 'bg-gray-400 cursor-not-allowed'
+                          : 'bg-green-600 hover:bg-green-700'
+                      }`}
                     >
-                      Lister
+                      {isActionLoading(item.tokenId) ? '⏳...' : 'Lister'}
                     </button>
                   </div>
                 )}

@@ -493,7 +493,7 @@ function MainContent() {
         );
 		
 	  case 'nft':
-        return <NftMarketplace signer={signer} account={account} />;
+        return <NftMarketplace signer={signer} account={account} chainId={chainId} />;
 
       case 'settings':
         return (
