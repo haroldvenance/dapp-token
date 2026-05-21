@@ -223,11 +223,12 @@ function MainContent() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Récupération des transactions SGC
+  // Récupération des transactions SGC (API V2)
   const fetchHistory = useCallback(async () => {
-    if (!account || !walletClient) return;
+    if (!account) return;
     const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
     if (!apiKey) {
+      // Fallback démo si pas de clé
       setSgcHistory([
         { from: "0x4a3f...7b2c", to: account, value: "150.00", timestamp: "Aujourd'hui, 10:24", isReceived: true },
         { from: account, to: "0x8d21...9f3e", value: "50.00", timestamp: "Hier, 18:45", isReceived: false },
@@ -238,20 +239,29 @@ function MainContent() {
     }
     setLoadingHistory(true);
     try {
-      const url = `https://api-sepolia.etherscan.io/api?module=account&action=tokentx&address=${account}&sort=desc&apikey=${apiKey}`;
+      const url =
+        `https://api.etherscan.io/v2/api` +
+        `?chainid=11155111` +
+        `&module=account` +
+        `&action=tokentx` +
+        `&contractaddress=${TOKEN_ADDRESS}` +
+        `&address=${account}` +
+        `&page=1` +
+        `&offset=20` +
+        `&sort=desc` +
+        `&apikey=${apiKey}`;
+
       const response = await fetch(url);
       const data = await response.json();
-      if (data.status === '1' && data.result) {
-        const filtered = data.result
-          .filter(tx => tx.contractAddress.toLowerCase() === TOKEN_ADDRESS.toLowerCase())
-          .slice(0, 10)
-          .map(tx => ({
-            from: tx.from,
-            to: tx.to,
-            value: ethers.utils.formatUnits(tx.value, tx.tokenDecimal),
-            timestamp: new Date(parseInt(tx.timeStamp) * 1000).toLocaleString(),
-            isReceived: tx.to.toLowerCase() === account.toLowerCase(),
-          }));
+
+      if (data.status === "1" && data.result) {
+        const filtered = data.result.slice(0, 10).map(tx => ({
+          from: tx.from,
+          to: tx.to,
+          value: ethers.utils.formatUnits(tx.value, tx.tokenDecimal),
+          timestamp: new Date(parseInt(tx.timeStamp) * 1000).toLocaleString(),
+          isReceived: tx.to.toLowerCase() === account.toLowerCase(),
+        }));
         setSgcHistory(filtered);
       } else {
         setSgcHistory([]);
@@ -261,7 +271,7 @@ function MainContent() {
     } finally {
       setLoadingHistory(false);
     }
-  }, [account, walletClient]);
+  }, [account]);
 
   // Récupération des événements Marketplace (corrigée)
   const fetchMarketEvents = useCallback(async () => {
@@ -282,7 +292,7 @@ function MainContent() {
           type: 'listed',
           tokenId: log.args.tokenId.toString(),
           seller: log.args.seller,
-          price: ethers.utils.formatUnits(log.args.price, 18), // déjà string
+          price: ethers.utils.formatUnits(log.args.price, 18),
           blockNumber: log.blockNumber
         })),
         ...saleLogs.map(log => ({
