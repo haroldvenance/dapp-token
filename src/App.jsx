@@ -14,6 +14,14 @@ import TokenArtifact from './contracts/SangoCoin.json';
 const TOKEN_ADDRESS = '0x55E3AC18F352cd77A01612d7C595Cb5bE367FB97';
 const ABI = TokenArtifact.abi;
 
+// Marketplace constants
+const MARKET_ADDRESS = '0xae1c6E5C3025E13E0bEd276a4a2Cd67c41CE4A28';
+const MARKET_ABI = [
+  "event Listed(uint256 indexed tokenId, address indexed seller, uint256 price)",
+  "event Sale(uint256 indexed tokenId, address indexed buyer, uint256 price)",
+  "event Cancelled(uint256 indexed tokenId)"
+];
+
 function walletClientToSigner(walletClient) {
   const { account, chain, transport } = walletClient;
   const network = {
@@ -85,13 +93,14 @@ function MainContent() {
   const [transferAmount, setTransferAmount] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const [history, setHistory] = useState([]);
+  const [sgcHistory, setSgcHistory] = useState([]);
+  const [marketEvents, setMarketEvents] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [loadingMarket, setLoadingMarket] = useState(false);
 
   const [showSendModal, setShowSendModal] = useState(false);
   const [showReceiveModal, setShowReceiveModal] = useState(false);
 
-  // Pages : 'home', 'nft', 'settings'
   const [currentPage, setCurrentPage] = useState('home');
 
   const { address: account, isConnected } = useAccount();
@@ -200,6 +209,7 @@ function MainContent() {
       setTransferAmount('');
       setShowSendModal(false);
       fetchHistory();
+      fetchMarketEvents();
     } catch (err) {
       toast.error(err.reason || err.message);
     }
@@ -213,19 +223,17 @@ function MainContent() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Historique réel
-  const fetchHistory = async () => {
+  // Récupération des transactions SGC
+  const fetchHistory = useCallback(async () => {
     if (!account || !walletClient) return;
     const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY;
     if (!apiKey) {
-      // Fallback démo si pas de clé
-      setHistory([
+      setSgcHistory([
         { from: "0x4a3f...7b2c", to: account, value: "150.00", timestamp: "Aujourd'hui, 10:24", isReceived: true },
         { from: account, to: "0x8d21...9f3e", value: "50.00", timestamp: "Hier, 18:45", isReceived: false },
         { from: "0x7e89...3c1a", to: account, value: "200.00", timestamp: "12 Mai, 14:32", isReceived: true },
         { from: account, to: "0x2b46...8d7f", value: "75.25", timestamp: "10 Mai, 09:15", isReceived: false },
       ]);
-      setLoadingHistory(false);
       return;
     }
     setLoadingHistory(true);
@@ -244,22 +252,130 @@ function MainContent() {
             timestamp: new Date(parseInt(tx.timeStamp) * 1000).toLocaleString(),
             isReceived: tx.to.toLowerCase() === account.toLowerCase(),
           }));
-        setHistory(filtered);
+        setSgcHistory(filtered);
       } else {
-        setHistory([]);
+        setSgcHistory([]);
       }
     } catch (err) {
       toast.error('Erreur lors du chargement de l\'historique');
     } finally {
       setLoadingHistory(false);
     }
-  };
+  }, [account, walletClient]);
+
+  // Récupération des événements Marketplace (corrigée)
+  const fetchMarketEvents = useCallback(async () => {
+    if (!account || !walletClient) return;
+    setLoadingMarket(true);
+    try {
+      const provider = new ethers.providers.Web3Provider(walletClient.transport);
+      const marketContract = new ethers.Contract(MARKET_ADDRESS, MARKET_ABI, provider);
+      
+      const [listedLogs, saleLogs, cancelLogs] = await Promise.all([
+        marketContract.queryFilter(marketContract.filters.Listed(), -10000),
+        marketContract.queryFilter(marketContract.filters.Sale(), -10000),
+        marketContract.queryFilter(marketContract.filters.Cancelled(), -10000)
+      ]);
+
+      const all = [
+        ...listedLogs.map(log => ({
+          type: 'listed',
+          tokenId: log.args.tokenId.toString(),
+          seller: log.args.seller,
+          price: ethers.utils.formatUnits(log.args.price, 18), // déjà string
+          blockNumber: log.blockNumber
+        })),
+        ...saleLogs.map(log => ({
+          type: 'sale',
+          tokenId: log.args.tokenId.toString(),
+          buyer: log.args.buyer,
+          price: ethers.utils.formatUnits(log.args.price, 18),
+          blockNumber: log.blockNumber
+        })),
+        ...cancelLogs.map(log => ({
+          type: 'cancel',
+          tokenId: log.args.tokenId.toString(),
+          seller: log.args.seller,
+          blockNumber: log.blockNumber
+        }))
+      ];
+
+      all.sort((a, b) => b.blockNumber - a.blockNumber);
+      setMarketEvents(all.slice(0, 20));
+    } catch (err) {
+      console.error('Erreur chargement événements marketplace', err);
+    } finally {
+      setLoadingMarket(false);
+    }
+  }, [account, walletClient]);
 
   useEffect(() => {
-    if (isConnected && currentPage === 'home') {
+    if (isConnected) {
       fetchHistory();
+      fetchMarketEvents();
     }
-  }, [isConnected, currentPage]);
+  }, [isConnected, fetchHistory, fetchMarketEvents]);
+
+  // Fusionner les historiques
+  const unifiedHistory = [...sgcHistory, ...marketEvents].sort((a, b) => {
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : (a.blockNumber * 15000);
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : (b.blockNumber * 15000);
+    return timeB - timeA;
+  }).slice(0, 20);
+
+  // Rendu d'un élément d'historique
+  const renderHistoryItem = (item, idx) => {
+    const isSGC = item.from !== undefined;
+    if (isSGC) {
+      return (
+        <div key={`sgc-${idx}`} className="flex justify-between items-center border-b border-gray-100 dark:border-gray-700 pb-2">
+          <div className="flex items-center gap-3">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center ${item.isReceived ? 'bg-green-100 dark:bg-green-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
+              {item.isReceived ? '⬇️' : '⬆️'}
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-800 dark:text-white">
+                {item.isReceived ? 'Reçu' : 'Envoyé'}
+                <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">SGC</span>
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                {item.isReceived ? `De : ${item.from.slice(0,6)}...${item.from.slice(-4)}` : `À : ${item.to.slice(0,6)}...${item.to.slice(-4)}`}
+              </p>
+              <p className="text-xs text-gray-400">{item.timestamp}</p>
+            </div>
+          </div>
+          <p className={`font-bold ${item.isReceived ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+            {item.isReceived ? '+' : '-'} {parseFloat(item.value).toFixed(2)} SGC
+          </p>
+        </div>
+      );
+    } else {
+      const badgeColor = item.type === 'listed' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300' :
+                         item.type === 'sale' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' :
+                         'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300';
+      const typeLabel = item.type === 'listed' ? 'NFT listé' : item.type === 'sale' ? 'NFT acheté' : 'Vente annulée';
+      return (
+        <div key={`nft-${idx}`} className="flex justify-between items-center border-b border-gray-100 dark:border-gray-700 pb-2">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full flex items-center justify-center bg-purple-100 dark:bg-purple-900/30">
+              🖼️
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-800 dark:text-white">
+                {typeLabel} <span className={`px-2 py-0.5 text-xs rounded-full ${badgeColor}`}>NFT #{item.tokenId}</span>
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {item.type === 'listed' && `Par : ${item.seller.slice(0,6)}... • Prix : ${item.price || 'N/A'} SGC`}
+                {item.type === 'sale' && `Acheteur : ${item.buyer.slice(0,6)}... • Prix : ${item.price || 'N/A'} SGC`}
+                {item.type === 'cancel' && `Par : ${item.seller.slice(0,6)}...`}
+              </p>
+              <p className="text-xs text-gray-400">Bloc #{item.blockNumber}</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+  };
 
   // Valeur USD approximative
   const usdValue = (parseFloat(balance) * 0.25).toFixed(2);
@@ -279,12 +395,10 @@ function MainContent() {
       <nav className="bg-white dark:bg-gray-800 shadow-md md:shadow-lg w-full fixed top-0 md:top-0 bottom-auto md:bottom-auto z-20 order-1 md:order-none">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-center md:justify-between items-center h-14 md:h-16">
-            {/* Logo / titre pour desktop (optionnel) */}
             <div className="hidden md:flex items-center gap-2">
               <img src="/logo.png" alt="Logo" className="w-8 h-8 rounded-full" onError={(e) => (e.target.style.display = 'none')} />
               <span className="font-bold text-gray-800 dark:text-white">SangoCoin</span>
             </div>
-            {/* Icônes de navigation */}
             <div className="flex space-x-6 md:space-x-8">
               {navItems.map((item) => (
                 <button
@@ -305,10 +419,9 @@ function MainContent() {
         </div>
       </nav>
 
-      {/* Contenu principal avec padding pour la barre de navigation */}
+      {/* Contenu principal */}
       <main className="flex-1 w-full mt-14 md:mt-16 mb-14 md:mb-0 overflow-y-auto p-4 sm:p-6 lg:p-8">
         <div className="max-w-7xl mx-auto">
-          {/* Wallet Connector (toujours visible) */}
           <div className="mb-4 md:mb-6">
             <WalletConnector />
           </div>
@@ -319,7 +432,7 @@ function MainContent() {
             </div>
           ) : (
             <>
-              {/* Solde SGC commun à toutes les pages */}
+              {/* Solde SGC */}
               <div className="text-center mb-6 md:mb-8">
                 <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Solde SGC</p>
                 <p className="text-4xl font-extrabold text-gray-800 dark:text-white mt-1">
@@ -331,7 +444,6 @@ function MainContent() {
               {/* Page Accueil */}
               {currentPage === 'home' && (
                 <div className="space-y-6">
-                  {/* Boutons Envoyer / Recevoir */}
                   <div className="grid grid-cols-2 gap-4">
                     <button
                       onClick={() => setShowSendModal(true)}
@@ -347,34 +459,14 @@ function MainContent() {
                     </button>
                   </div>
 
-                  {/* Historique des transactions */}
+                  {/* Historique unifié */}
                   <div>
                     <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-3">Historique des transactions</h3>
-                    {loadingHistory ? (
+                    {(loadingHistory || loadingMarket) ? (
                       <p className="text-center text-gray-500 py-4">Chargement...</p>
-                    ) : history.length > 0 ? (
+                    ) : unifiedHistory.length > 0 ? (
                       <div className="space-y-3 max-h-80 overflow-y-auto">
-                        {history.map((tx, idx) => (
-                          <div key={idx} className="flex justify-between items-center border-b border-gray-100 dark:border-gray-700 pb-2">
-                            <div className="flex items-center gap-3">
-                              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${tx.isReceived ? 'bg-green-100 dark:bg-green-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
-                                {tx.isReceived ? '⬇️' : '⬆️'}
-                              </div>
-                              <div>
-                                <p className="text-sm font-medium text-gray-800 dark:text-white">
-                                  {tx.isReceived ? 'Reçu' : 'Envoyé'}
-                                </p>
-                                <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                                  {tx.isReceived ? `De : ${tx.from.slice(0,6)}...${tx.from.slice(-4)}` : `À : ${tx.to.slice(0,6)}...${tx.to.slice(-4)}`}
-                                </p>
-                                <p className="text-xs text-gray-400">{tx.timestamp}</p>
-                              </div>
-                            </div>
-                            <p className={`font-bold ${tx.isReceived ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                              {tx.isReceived ? '+' : '-'} {parseFloat(tx.value).toFixed(2)} SGC
-                            </p>
-                          </div>
-                        ))}
+                        {unifiedHistory.map(renderHistoryItem)}
                       </div>
                     ) : (
                       <p className="text-center text-gray-500 py-4">Aucune transaction trouvée.</p>
@@ -418,7 +510,7 @@ function MainContent() {
         </div>
       </main>
 
-      {/* Modales Envoyer / Recevoir (identiques à avant) */}
+      {/* Modales Envoyer / Recevoir */}
       {showSendModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white dark:bg-gray-800 rounded-xl max-w-sm w-full p-5 shadow-xl">

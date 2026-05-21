@@ -29,62 +29,92 @@ const NFT_ADDRESS = "0xBAD996537E58F4a72c6d7d0d6ECe38bf43d9d559";
 const MARKET_ADDRESS = "0xae1c6E5C3025E13E0bEd276a4a2Cd67c41CE4A28";
 const TOKEN_ADDRESS = "0x55E3AC18F352cd77A01612d7C595Cb5bE367FB97";
 
-const TOTAL_NFTS = 10; // NFT #0 à #9
+const TOTAL_NFTS = 10;
+
+// Clé pour le cache localStorage
+const CACHE_KEY = 'nft_metadata_cache_v1';
 
 function NftMarketplace({ signer, account, chainId }) {
   const [nfts, setNfts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [loadingAction, setLoadingAction] = useState({}); // tokenId -> true/false
-  const [listPrices, setListPrices] = useState({}); // tokenId -> prix saisi
+  const [loadingAction, setLoadingAction] = useState({});
+  const [listPrices, setListPrices] = useState({});
+  const [viewMode, setViewMode] = useState('market'); // 'market' ou 'owned'
 
-  // Charger les métadonnées des 10 NFTs
+  // Fonction pour obtenir le cache
+  const getCache = () => {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  };
+
   const loadNFTs = useCallback(async () => {
     if (!signer) return;
     setLoading(true);
     try {
       const nftContract = new ethers.Contract(NFT_ADDRESS, NFT_ABI, signer);
       const marketContract = new ethers.Contract(MARKET_ADDRESS, MARKET_ABI, signer);
-      const tokenContract = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
 
-      const items = [];
-      for (let i = 0; i < TOTAL_NFTS; i++) {
+      // Paralléliser les appels on-chain
+      const tokenIds = Array.from({ length: TOTAL_NFTS }, (_, i) => i);
+      const [uris, owners, isListedArr] = await Promise.all([
+        Promise.all(tokenIds.map(i => nftContract.tokenURI(i).catch(() => ''))),
+        Promise.all(tokenIds.map(i => nftContract.ownerOf(i).catch(() => ''))),
+        Promise.all(tokenIds.map(i => marketContract.isListed(i).catch(() => false)))
+      ]);
+
+      // Récupérer les listings pour les tokens listés
+      const listingPromises = isListedArr.map(async (listed, i) => {
+        if (!listed) return null;
         try {
-          const uri = await nftContract.tokenURI(i);
-          const owner = await nftContract.ownerOf(i);
-          const listed = await marketContract.isListed(i);
-          let listing = null;
-          if (listed) {
-            const res = await marketContract.listings(i);
-            listing = {
-              seller: res.seller,
-              price: ethers.utils.formatUnits(res.price, 18),
-              rawPrice: res.price,
-              active: res.active
-            };
-          }
-          // Récupérer le JSON IPFS
-          let metadata = { name: `SangoTech #${i}`, image: '' };
-          try {
-            const httpUri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-            const resp = await fetch(httpUri);
-            if (resp.ok) metadata = await resp.json();
-            if (metadata.image && metadata.image.startsWith('ipfs://')) {
-              metadata.image = metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/');
-            }
-          } catch (e) {
-            console.warn('Erreur chargement metadata', i, e.message);
-          }
-          items.push({
-            tokenId: i,
-            owner,
-            metadata,
-            listed,
-            listing
-          });
-        } catch (e) {
-          console.warn('Erreur token', i, e.message);
+          const res = await marketContract.listings(i);
+          return {
+            seller: res.seller,
+            price: ethers.utils.formatUnits(res.price, 18),
+            rawPrice: res.price,
+            active: res.active
+          };
+        } catch { return null; }
+      });
+      const listings = await Promise.all(listingPromises);
+
+      // Charger les métadonnées avec cache
+      const cache = getCache();
+      const metadataPromises = uris.map(async (uri, i) => {
+        // Vérifier le cache
+        if (cache[i] && cache[i].uri === uri) {
+          return cache[i].metadata;
         }
-      }
+        if (!uri) return { name: `SangoTech #${i}`, image: '' };
+        try {
+          const httpUri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+          const resp = await fetch(httpUri);
+          if (!resp.ok) throw new Error('Fetch failed');
+          const meta = await resp.json();
+          if (meta.image && meta.image.startsWith('ipfs://')) {
+            meta.image = meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/');
+          }
+          // Mettre en cache
+          cache[i] = { uri, metadata: meta };
+          return meta;
+        } catch {
+          return { name: `SangoTech #${i}`, image: '' };
+        }
+      });
+      const metadatas = await Promise.all(metadataPromises);
+      // Sauvegarder le cache
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+
+      const items = tokenIds.map(i => ({
+        tokenId: i,
+        owner: owners[i],
+        metadata: metadatas[i],
+        listed: isListedArr[i],
+        listing: listings[i]
+      }));
       setNfts(items);
     } catch (err) {
       toast.error('Erreur chargement NFTs');
@@ -93,9 +123,12 @@ function NftMarketplace({ signer, account, chainId }) {
     }
   }, [signer]);
 
-  useEffect(() => {
-    loadNFTs();
-  }, [loadNFTs]);
+  useEffect(() => { loadNFTs(); }, [loadNFTs]);
+
+  // Filtrer les NFTs selon le mode d'affichage
+  const filteredNfts = viewMode === 'owned'
+    ? nfts.filter(item => item.owner.toLowerCase() === account?.toLowerCase())
+    : nfts.filter(item => item.listed && item.listing?.active);
 
   // Indique si l'action est en cours pour un token donné
   const isActionLoading = (tokenId) => !!loadingAction[tokenId];
@@ -121,7 +154,6 @@ function NftMarketplace({ signer, account, chainId }) {
       const txList = await marketContract.listNFT(tokenId, priceWei);
       await txList.wait();
       toast.success('NFT listé avec succès');
-      // Réinitialiser le prix saisi
       setListPrices(prev => ({ ...prev, [tokenId]: '' }));
       await loadNFTs();
     } catch (err) {
@@ -199,86 +231,116 @@ function NftMarketplace({ signer, account, chainId }) {
 
   return (
     <div className="space-y-6">
-      <h3 className="text-lg font-semibold text-gray-800">🎨 Galerie SangoTech NFT</h3>
+      {/* En-tête avec navigation des vues */}
+      {account && (
+        <div className="flex justify-center gap-4 mb-4">
+          <button
+            onClick={() => setViewMode('market')}
+            className={`px-4 py-2 rounded-full text-sm font-medium transition ${
+              viewMode === 'market'
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
+            }`}
+          >
+            Marché
+          </button>
+          <button
+            onClick={() => setViewMode('owned')}
+            className={`px-4 py-2 rounded-full text-sm font-medium transition ${
+              viewMode === 'owned'
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
+            }`}
+          >
+            Mes NFTs
+          </button>
+        </div>
+      )}
 
-      {/* Grille des NFTs */}
-      <div className="grid grid-cols-2 gap-4">
-        {nfts.map(item => (
-          <div key={item.tokenId} className="bg-white rounded-xl shadow p-2 flex flex-col items-center text-center">
-            {item.metadata.image ? (
-              <img src={item.metadata.image} alt={item.metadata.name} className="w-full h-32 object-cover rounded-lg" />
-            ) : (
-              <div className="w-full h-32 bg-gray-200 rounded-lg flex items-center justify-center text-gray-400">Pas d'image</div>
-            )}
-            <p className="text-sm font-medium mt-1">{item.metadata.name}</p>
-            <p className="text-xs text-gray-500">#{item.tokenId}</p>
-            <p className="text-xs text-gray-400 truncate w-full" title={item.owner}>
-              {item.owner.slice(0,6)}...
-            </p>
+      {/* Galerie filtrée */}
+      {filteredNfts.length === 0 ? (
+        <p className="text-center text-gray-500 py-8">
+          {viewMode === 'market' ? 'Aucun NFT en vente pour le moment.' : 'Vous ne possédez aucun NFT.'}
+        </p>
+      ) : (
+        <div className="grid grid-cols-2 gap-4">
+          {filteredNfts.map(item => (
+            <div key={item.tokenId} className="bg-white dark:bg-gray-800 rounded-xl shadow p-2 flex flex-col items-center text-center">
+              {item.metadata.image ? (
+                <img src={item.metadata.image} alt={item.metadata.name} className="w-full h-32 object-cover rounded-lg" />
+              ) : (
+                <div className="w-full h-32 bg-gray-200 dark:bg-gray-700 rounded-lg flex items-center justify-center text-gray-400">Pas d'image</div>
+              )}
+              <p className="text-sm font-medium mt-1 text-gray-800 dark:text-white">{item.metadata.name}</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">#{item.tokenId}</p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 truncate w-full" title={item.owner}>
+                {item.owner.slice(0,6)}...
+              </p>
 
-            {/* Actions selon l'état */}
-            {item.listed && item.listing?.active ? (
-              <div className="mt-2 w-full">
-                <p className="text-xs font-semibold text-green-700">{item.listing.price} SGC</p>
-                {item.owner.toLowerCase() === account?.toLowerCase() ? (
-                  <button
-                    onClick={() => handleCancel(item.tokenId)}
-                    disabled={isActionLoading(item.tokenId)}
-                    className={`mt-1 w-full text-white text-xs py-1 rounded transition ${
-                      isActionLoading(item.tokenId)
-                        ? 'bg-gray-400 cursor-not-allowed'
-                        : 'bg-red-500 hover:bg-red-600'
-                    }`}
-                  >
-                    {isActionLoading(item.tokenId) ? '⏳...' : 'Annuler vente'}
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => handleBuy(item.tokenId, item.listing.rawPrice)}
-                    disabled={isActionLoading(item.tokenId)}
-                    className={`mt-1 w-full text-white text-xs py-1 rounded transition ${
-                      isActionLoading(item.tokenId)
-                        ? 'bg-gray-400 cursor-not-allowed'
-                        : 'bg-indigo-600 hover:bg-indigo-700'
-                    }`}
-                  >
-                    {isActionLoading(item.tokenId) ? '⏳...' : 'Acheter'}
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="mt-2 w-full">
-                {item.owner.toLowerCase() === account?.toLowerCase() && (
-                  <div>
-                    <input
-                      type="number"
-                      placeholder="Prix en SGC"
-                      value={listPrices[item.tokenId] || ''}
-                      onChange={(e) => setListPrices(prev => ({ ...prev, [item.tokenId]: e.target.value }))}
-                      className="w-full text-xs border rounded px-2 py-1 mb-1 focus:ring-2 focus:ring-green-400 outline-none"
-                      disabled={isActionLoading(item.tokenId)}
-                    />
+              {/* Actions selon l'état */}
+              {item.listed && item.listing?.active ? (
+                <div className="mt-2 w-full">
+                  <p className="text-xs font-semibold text-green-700 dark:text-green-400">{item.listing.price} SGC</p>
+                  {item.owner.toLowerCase() === account?.toLowerCase() ? (
                     <button
-                      onClick={() => handleList(item.tokenId)}
-                      disabled={isActionLoading(item.tokenId) || !listPrices[item.tokenId]}
-                      className={`w-full text-white text-xs py-1 rounded transition ${
-                        isActionLoading(item.tokenId) || !listPrices[item.tokenId]
+                      onClick={() => handleCancel(item.tokenId)}
+                      disabled={isActionLoading(item.tokenId)}
+                      className={`mt-1 w-full text-white text-xs py-1 rounded transition ${
+                        isActionLoading(item.tokenId)
                           ? 'bg-gray-400 cursor-not-allowed'
-                          : 'bg-green-600 hover:bg-green-700'
+                          : 'bg-red-500 hover:bg-red-600'
                       }`}
                     >
-                      {isActionLoading(item.tokenId) ? '⏳...' : 'Lister'}
+                      {isActionLoading(item.tokenId) ? '⏳...' : 'Annuler vente'}
                     </button>
-                  </div>
-                )}
-                {item.owner.toLowerCase() !== account?.toLowerCase() && (
-                  <p className="text-xs text-gray-500">Non listé</p>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
+                  ) : (
+                    <button
+                      onClick={() => handleBuy(item.tokenId, item.listing.rawPrice)}
+                      disabled={isActionLoading(item.tokenId)}
+                      className={`mt-1 w-full text-white text-xs py-1 rounded transition ${
+                        isActionLoading(item.tokenId)
+                          ? 'bg-gray-400 cursor-not-allowed'
+                          : 'bg-indigo-600 hover:bg-indigo-700'
+                      }`}
+                    >
+                      {isActionLoading(item.tokenId) ? '⏳...' : 'Acheter'}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-2 w-full">
+                  {item.owner.toLowerCase() === account?.toLowerCase() && (
+                    <div>
+                      <input
+                        type="number"
+                        placeholder="Prix en SGC"
+                        value={listPrices[item.tokenId] || ''}
+                        onChange={(e) => setListPrices(prev => ({ ...prev, [item.tokenId]: e.target.value }))}
+                        className="w-full text-xs border rounded px-2 py-1 mb-1 focus:ring-2 focus:ring-green-400 outline-none bg-white dark:bg-gray-700 text-gray-800 dark:text-white border-gray-300 dark:border-gray-600"
+                        disabled={isActionLoading(item.tokenId)}
+                      />
+                      <button
+                        onClick={() => handleList(item.tokenId)}
+                        disabled={isActionLoading(item.tokenId) || !listPrices[item.tokenId]}
+                        className={`w-full text-white text-xs py-1 rounded transition ${
+                          isActionLoading(item.tokenId) || !listPrices[item.tokenId]
+                            ? 'bg-gray-400 cursor-not-allowed'
+                            : 'bg-green-600 hover:bg-green-700'
+                        }`}
+                      >
+                        {isActionLoading(item.tokenId) ? '⏳...' : 'Lister'}
+                      </button>
+                    </div>
+                  )}
+                  {item.owner.toLowerCase() !== account?.toLowerCase() && !item.listed && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Non listé</p>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
